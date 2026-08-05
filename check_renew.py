@@ -172,7 +172,6 @@ def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
     for acc_idx, name, status, expiry, slot_type, lifecycle in domains:
         renew = "yes" if needs_renewal(expiry) else "no"
         expiry_disp = expiry if len(expiry) <= 12 else expiry[:9] + "..."
-        # 终端输出脱敏
         masked = mask_domain(name)
         print(
             f"{acc_idx:<6} {masked:<30} {status:<12} {expiry_disp:<12} "
@@ -252,31 +251,29 @@ def main() -> None:
     print_table(all_domains)
     print()
 
-    # 构建 Telegram 通知：按账号分组，仅列出需续期的域名（完整域名，不脱敏）
+    # ========== 构建 Telegram 通知 ==========
+    # 按账号分组收集所有域名
+    domains_by_account: dict[int, List[Tuple[str, bool]]] = defaultdict(list)
+    renewal_needed = 0
+    total_count = len(all_domains)
+
+    for acc_idx, name, status, expiry, slot_type, lifecycle in all_domains:
+        need = needs_renewal(expiry)
+        if need:
+            renewal_needed += 1
+        domains_by_account[acc_idx].append((name, need))
+
+    # 构建消息
     notification_lines: List[str] = [
         "<b>DigitalPlat 域名到期检查</b>",
         "",
     ]
 
-    renewal_needed = 0
-    total_count = len(all_domains)
-
-    # 按账号分组收集需续期域名
-    renewals_by_account: dict[int, List[str]] = defaultdict(list)
-
-    for acc_idx, name, status, expiry, slot_type, lifecycle in all_domains:
-        if needs_renewal(expiry):
-            renewal_needed += 1
-            renewals_by_account[acc_idx].append(name)
-
-    if renewal_needed > 0:
-        for acc_idx in sorted(renewals_by_account.keys()):
-            notification_lines.append(f"<b>账号 {acc_idx}</b>")
-            for name in renewals_by_account[acc_idx]:
-                notification_lines.append(f"⚠️ <code>{name}</code>")
-            notification_lines.append("")
-    else:
-        notification_lines.append("✅ 所有域名无需续期")
+    for acc_idx in sorted(domains_by_account.keys()):
+        notification_lines.append(f"<b>账号 {acc_idx}</b>")
+        for name, need in domains_by_account[acc_idx]:
+            status_text = "⚠️ 需续期" if need else "✅ 无需续期"
+            notification_lines.append(f"<code>{name}</code>，{status_text}")
         notification_lines.append("")
 
     notification_lines.append(f"📊 共 {total_count} 个域名（{len(API_KEYS)} 个账号）")
