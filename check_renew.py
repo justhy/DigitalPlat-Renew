@@ -9,6 +9,7 @@ import sys
 import json
 import subprocess
 from datetime import datetime, timezone
+from collections import defaultdict
 from typing import List, Tuple, Optional, Any
 
 # ========== 配置 ==========
@@ -25,7 +26,6 @@ def require_env(name: str) -> str:
     return value
 
 
-# 读取多个 API_KEY
 API_KEYS_RAW = require_env("API_KEY")
 API_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
 TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
@@ -42,12 +42,17 @@ def check_dependencies() -> None:
         sys.exit(1)
 
 
+# ========== 脱敏工具（仅用于终端输出） ==========
+def mask_domain(name: str) -> str:
+    """隐藏域名中第一个 '.' 前的字符，保护隐私"""
+    if "." not in name:
+        return "***"
+    idx = name.find(".")
+    return "***" + name[idx:]
+
+
 # ========== API 请求 ==========
 def fetch_domains(api_key: str) -> Any:
-    """
-    获取单个账号的域名列表。
-    优先使用 cloudscraper 直接请求，失败时回退到同目录 helper 脚本。
-    """
     import cloudscraper
 
     url = f"{API_BASE}/domains"
@@ -57,7 +62,6 @@ def fetch_domains(api_key: str) -> Any:
         "Accept": "application/json",
     }
 
-    # 直接请求
     try:
         scraper = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "linux", "desktop": True}
@@ -68,7 +72,6 @@ def fetch_domains(api_key: str) -> Any:
     except Exception as e:
         print(f"直接请求失败: {e}", file=sys.stderr)
 
-    # 回退 helper
     script_dir = os.path.dirname(os.path.abspath(__file__))
     helper = os.path.join(script_dir, "digitalplat_api_helper.py")
 
@@ -91,7 +94,6 @@ def fetch_domains(api_key: str) -> Any:
 
 
 def extract_domain_list(data: Any) -> Tuple[List[dict], str]:
-    """从多种可能的 JSON 结构中提取域名数组"""
     if isinstance(data, list):
         return data, "直接数组"
     if isinstance(data, dict):
@@ -105,7 +107,6 @@ def extract_domain_list(data: Any) -> Tuple[List[dict], str]:
 
 
 def parse_domain_fields(item: dict) -> Optional[Tuple[str, str, str, str, str]]:
-    """解析域名字段，支持多种字段名变体"""
     name = item.get("name") or item.get("domain") or ""
     status = item.get("status") or item.get("state") or ""
     expiry = item.get("expiry_date") or item.get("expiry") or item.get("expire") or ""
@@ -118,7 +119,6 @@ def parse_domain_fields(item: dict) -> Optional[Tuple[str, str, str, str, str]]:
 
 # ========== 到期判断 ==========
 def parse_expiry(expiry: str) -> Optional[datetime]:
-    """尝试多种格式解析到期时间"""
     if not expiry or expiry.lower() in ("null", "permanent", ""):
         return None
 
@@ -148,7 +148,6 @@ def parse_expiry(expiry: str) -> Optional[datetime]:
 
 
 def needs_renewal(expiry: str) -> bool:
-    """判断域名是否需要续期（120 天内到期）"""
     dt = parse_expiry(expiry)
     if dt is None:
         return False
@@ -157,9 +156,8 @@ def needs_renewal(expiry: str) -> bool:
     return days_left <= RENEWAL_WINDOW_DAYS
 
 
-# ========== 终端输出 ==========
+# ========== 终端输出（脱敏） ==========
 def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
-    """打印终端表格（含账号编号）"""
     header = (
         f"{'账号':<6} {'域名':<30} {'状态':<12} {'到期时间':<12} "
         f"{'Slot Type':<12} {'Lifecycle':<12} {'需续期':<6}"
@@ -174,13 +172,15 @@ def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
     for acc_idx, name, status, expiry, slot_type, lifecycle in domains:
         renew = "yes" if needs_renewal(expiry) else "no"
         expiry_disp = expiry if len(expiry) <= 12 else expiry[:9] + "..."
+        # 终端输出脱敏
+        masked = mask_domain(name)
         print(
-            f"{acc_idx:<6} {name:<30} {status:<12} {expiry_disp:<12} "
+            f"{acc_idx:<6} {masked:<30} {status:<12} {expiry_disp:<12} "
             f"{slot_type:<12} {lifecycle:<12} {renew:<6}"
         )
 
 
-# ========== Telegram 通知 ==========
+# ========== Telegram 通知（不脱敏） ==========
 def send_telegram(text: str) -> None:
     import requests
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -195,7 +195,6 @@ def send_telegram(text: str) -> None:
 
 
 def send_long_message(lines: List[str]) -> None:
-    """发送长消息，超过 3800 字符时分片"""
     message = ""
     for line in lines:
         if len(message) + len(line) > 3800:
@@ -216,10 +215,9 @@ def main() -> None:
 
     print(f"检测到 {len(API_KEYS)} 个账号", file=sys.stderr)
 
-    # 存储结构: (账号编号, 域名, 状态, 到期时间, slot_type, lifecycle)
+    # 存储结构: (账号编号, 原始域名, 状态, 到期时间, slot_type, lifecycle)
     all_domains: List[Tuple[int, str, str, str, str, str]] = []
 
-    # 逐个账号获取
     for idx, api_key in enumerate(API_KEYS, start=1):
         print(f"\n正在获取账号 {idx} 的域名列表...", file=sys.stderr)
         try:
@@ -249,12 +247,12 @@ def main() -> None:
         print("警告: 所有账号均未解析到数据", file=sys.stderr)
         sys.exit(0)
 
-    # 打印表格
+    # 终端打印：脱敏
     print()
     print_table(all_domains)
     print()
 
-    # 构建 Telegram 通知
+    # 构建 Telegram 通知：按账号分组，仅列出需续期的域名（完整域名，不脱敏）
     notification_lines: List[str] = [
         "<b>DigitalPlat 域名到期检查</b>",
         "",
@@ -263,27 +261,30 @@ def main() -> None:
     renewal_needed = 0
     total_count = len(all_domains)
 
-    # 按账号分组列出需续期域名
-    current_account = 0
+    # 按账号分组收集需续期域名
+    renewals_by_account: dict[int, List[str]] = defaultdict(list)
+
     for acc_idx, name, status, expiry, slot_type, lifecycle in all_domains:
         if needs_renewal(expiry):
             renewal_needed += 1
-            if acc_idx != current_account:
-                notification_lines.append(f"<b>账号 {acc_idx}</b>")
-                current_account = acc_idx
-            notification_lines.append(f"⚠️ <code>{name}</code> - 到期: {expiry}")
+            renewals_by_account[acc_idx].append(name)
 
-    notification_lines.append("")
+    if renewal_needed > 0:
+        for acc_idx in sorted(renewals_by_account.keys()):
+            notification_lines.append(f"<b>账号 {acc_idx}</b>")
+            for name in renewals_by_account[acc_idx]:
+                notification_lines.append(f"⚠️ <code>{name}</code>")
+            notification_lines.append("")
+    else:
+        notification_lines.append("✅ 所有域名无需续期")
+        notification_lines.append("")
+
     notification_lines.append(f"📊 共 {total_count} 个域名（{len(API_KEYS)} 个账号）")
-    notification_lines.append("")
     notification_lines.append(f"⚠️ {renewal_needed} 个域名需在 120 天内续期")
     notification_lines.append("")
     notification_lines.append('🔗 <a href="https://dash.domain.digitalplat.org/dashboard">前往 Dashboard 续期</a>')
     notification_lines.append("")
     notification_lines.append("⚠️ API 未暴露 renewal 接口，需手动在 dashboard 操作")
-
-    if renewal_needed == 0:
-        notification_lines.append("✅ 所有域名无需续期")
 
     # 发送通知
     try:
