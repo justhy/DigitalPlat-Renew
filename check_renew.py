@@ -301,7 +301,7 @@ def main() -> None:
         notification_lines.append(f"<b>账号 {acc_idx}</b>")
         for name, need in domains_by_account[acc_idx]:
             status_text = "⚠️ 需续期" if need else "✅ 无需续期"
-            notification_lines.append(f"<code>{name}</code>，{status_text}")
+            notification_lines.append(f"<code>{name}</code>：{status_text}")
         notification_lines.append("")
 
     notification_lines.append(f"📊 共 {total_count} 个域名（{len(API_KEYS)} 个账号）")
