@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import subprocess
+import requests
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import List, Tuple, Optional, Any
@@ -30,6 +31,8 @@ API_KEYS_RAW = require_env("API_KEY")
 API_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
 TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
 TG_CHAT_ID = require_env("TG_CHAT_ID")
+MAGICPUSH_URL = require_env("MAGICPUSH_URL")
+MAGICPUSH_TOKEN = require_env("MAGICPUSH_TOKEN")
 
 
 # ========== 依赖检查 ==========
@@ -178,10 +181,32 @@ def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
             f"{slot_type:<12} {lifecycle:<12} {renew:<6}"
         )
 
-
+# ========== MagicPush 通知（不脱敏） ==========
+def send_magicpush(text: str) -> None:
+    if not MAGICPUSH_URL or not MAGICPUSH_TOKEN:
+        print("未配置MagicPush信息，跳过MagicPush通知")
+        return
+    
+    url = MAGICPUSH_URL
+    headers = {
+        "Authorization": f"Bearer {MAGICPUSH_TOKEN}",
+        "Accept": "application/json"
+    }
+    payload = {
+        "title": "DigitalPlat 域名续期检测",
+        "content": text,
+        "type": "text"
+    }
+    data = json.dumps(payload).encode("utf-8")
+    resp = requests.post(url, data=data, headers=headers, timeout=30)
+    resp.raise_for_status()
+    
 # ========== Telegram 通知（不脱敏） ==========
 def send_telegram(text: str) -> None:
-    import requests
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("未配置TG通知信息，跳过TG通知")
+        return
+    
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
@@ -192,16 +217,19 @@ def send_telegram(text: str) -> None:
     resp = requests.post(url, data=payload, timeout=30)
     resp.raise_for_status()
 
-
+def sendMSG(text: str) -> None:
+    send_telegram(text)
+    send_magicpush(text)
+    
 def send_long_message(lines: List[str]) -> None:
     message = ""
     for line in lines:
         if len(message) + len(line) > 3800:
-            send_telegram(message)
+            sendMSG(message)
             message = "<b>DigitalPlat 域名检查（续）</b>"
         message += ("\n" if message else "") + line
     if message:
-        send_telegram(message)
+        sendMSG(message)
 
 
 # ========== 主流程 ==========
