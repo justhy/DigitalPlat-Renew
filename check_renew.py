@@ -7,6 +7,7 @@ DigitalPlat Domain Renewal Checker (Python 完整版)
 import os
 import sys
 import json
+import re
 import subprocess
 import requests
 from datetime import datetime, timezone
@@ -51,6 +52,18 @@ def mask_domain(name: str) -> str:
         return "***"
     idx = name.find(".")
     return "***" + name[idx:]
+
+
+# ========== HTML 标签去除（用于 MagicPush 纯文本） ==========
+def strip_html(text: str) -> str:
+    """去除 HTML 标签，将 <br> 转为换行，用于不支持 HTML 的推送渠道"""
+    # 将 <br> 标签转为换行
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    # 去除所有 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 合并多余空行
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 # ========== API 请求 ==========
@@ -181,7 +194,7 @@ def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
         )
 
 
-# ========== Telegram 通知（独立发送，失败不阻断） ==========
+# ========== Telegram 通知（保留 HTML） ==========
 def send_telegram(text: str) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("未配置 TG 通知信息，跳过 Telegram", file=sys.stderr)
@@ -202,7 +215,6 @@ def send_telegram(text: str) -> bool:
         return True
     except requests.HTTPError as e:
         print(f"Telegram 发送失败: {e}", file=sys.stderr)
-        # 调试：打印前 200 字符的脱敏内容
         preview = text[:200].replace("\n", " | ")
         print(f"TG 消息预览: {preview}...", file=sys.stderr)
         return False
@@ -211,11 +223,14 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-# ========== MagicPush 通知（修复 Content-Type） ==========
+# ========== MagicPush 通知（去除 HTML 标签） ==========
 def send_magicpush(text: str) -> bool:
     if not MAGICPUSH_URL or not MAGICPUSH_TOKEN:
         print("未配置 MagicPush 信息，跳过 MagicPush", file=sys.stderr)
         return False
+
+    # 去除 HTML 标签，转为纯文本
+    plain_text = strip_html(text)
 
     url = MAGICPUSH_URL
     headers = {
@@ -225,7 +240,7 @@ def send_magicpush(text: str) -> bool:
     }
     payload = {
         "title": "DigitalPlat 域名续期检测",
-        "content": text,
+        "content": plain_text,
         "type": "text",
     }
 
@@ -240,11 +255,9 @@ def send_magicpush(text: str) -> bool:
 
 
 def sendMSG(text: str) -> None:
-    """同时发送到 Telegram 和 MagicPush，互不干扰"""
-    tg_ok = send_telegram(text)
-    mp_ok = send_magicpush(text)
-    if not tg_ok and not mp_ok:
-        raise RuntimeError("所有通知渠道均发送失败")
+    """同时发送到 Telegram（HTML）和 MagicPush（纯文本），互不干扰"""
+    send_telegram(text)
+    send_magicpush(text)
 
 
 def send_long_message(lines: List[str]) -> None:
