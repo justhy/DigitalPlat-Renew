@@ -29,17 +29,16 @@ def require_env(name: str) -> str:
 
 API_KEYS_RAW = require_env("API_KEY")
 API_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
-TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
-TG_CHAT_ID = require_env("TG_CHAT_ID")
-MAGICPUSH_URL = require_env("MAGICPUSH_URL")
-MAGICPUSH_TOKEN = require_env("MAGICPUSH_TOKEN")
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+MAGICPUSH_URL = os.environ.get("MAGICPUSH_URL", "")
+MAGICPUSH_TOKEN = os.environ.get("MAGICPUSH_TOKEN", "")
 
 
 # ========== 依赖检查 ==========
 def check_dependencies() -> None:
     try:
         import cloudscraper  # noqa: F401
-        import requests  # noqa: F401
     except ImportError as e:
         print(f"错误: 缺少依赖 {e.name}，运行: pip3 install cloudscraper requests", file=sys.stderr)
         sys.exit(1)
@@ -181,32 +180,13 @@ def print_table(domains: List[Tuple[int, str, str, str, str, str]]) -> None:
             f"{slot_type:<12} {lifecycle:<12} {renew:<6}"
         )
 
-# ========== MagicPush 通知（不脱敏） ==========
-def send_magicpush(text: str) -> None:
-    if not MAGICPUSH_URL or not MAGICPUSH_TOKEN:
-        print("未配置MagicPush信息，跳过MagicPush通知")
-        return
-    
-    url = MAGICPUSH_URL
-    headers = {
-        "Authorization": f"Bearer {MAGICPUSH_TOKEN}",
-        "Accept": "application/json"
-    }
-    payload = {
-        "title": "DigitalPlat 域名续期检测",
-        "content": text,
-        "type": "text"
-    }
-    data = json.dumps(payload).encode("utf-8")
-    resp = requests.post(url, data=data, headers=headers, timeout=30)
-    resp.raise_for_status()
-    
-# ========== Telegram 通知（不脱敏） ==========
-def send_telegram(text: str) -> None:
+
+# ========== Telegram 通知（独立发送，失败不阻断） ==========
+def send_telegram(text: str) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("未配置TG通知信息，跳过TG通知")
-        return
-    
+        print("未配置 TG 通知信息，跳过 Telegram", file=sys.stderr)
+        return False
+
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
@@ -214,13 +194,59 @@ def send_telegram(text: str) -> None:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    resp = requests.post(url, data=payload, timeout=30)
-    resp.raise_for_status()
+
+    try:
+        resp = requests.post(url, data=payload, timeout=30)
+        resp.raise_for_status()
+        print("Telegram 通知发送成功", file=sys.stderr)
+        return True
+    except requests.HTTPError as e:
+        print(f"Telegram 发送失败: {e}", file=sys.stderr)
+        # 调试：打印前 200 字符的脱敏内容
+        preview = text[:200].replace("\n", " | ")
+        print(f"TG 消息预览: {preview}...", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Telegram 发送异常: {e}", file=sys.stderr)
+        return False
+
+
+# ========== MagicPush 通知（修复 Content-Type） ==========
+def send_magicpush(text: str) -> bool:
+    if not MAGICPUSH_URL or not MAGICPUSH_TOKEN:
+        print("未配置 MagicPush 信息，跳过 MagicPush", file=sys.stderr)
+        return False
+
+    url = MAGICPUSH_URL
+    headers = {
+        "Authorization": f"Bearer {MAGICPUSH_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "title": "DigitalPlat 域名续期检测",
+        "content": text,
+        "type": "text",
+    }
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        print("MagicPush 通知发送成功", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"MagicPush 发送失败: {e}", file=sys.stderr)
+        return False
+
 
 def sendMSG(text: str) -> None:
-    send_telegram(text)
-    send_magicpush(text)
-    
+    """同时发送到 Telegram 和 MagicPush，互不干扰"""
+    tg_ok = send_telegram(text)
+    mp_ok = send_magicpush(text)
+    if not tg_ok and not mp_ok:
+        raise RuntimeError("所有通知渠道均发送失败")
+
+
 def send_long_message(lines: List[str]) -> None:
     message = ""
     for line in lines:
@@ -279,8 +305,7 @@ def main() -> None:
     print_table(all_domains)
     print()
 
-    # ========== 构建 Telegram 通知 ==========
-    # 按账号分组收集所有域名
+    # ========== 构建通知消息 ==========
     domains_by_account: dict[int, List[Tuple[str, bool]]] = defaultdict(list)
     renewal_needed = 0
     total_count = len(all_domains)
@@ -291,7 +316,6 @@ def main() -> None:
             renewal_needed += 1
         domains_by_account[acc_idx].append((name, need))
 
-    # 构建消息
     notification_lines: List[str] = [
         "<b>DigitalPlat 域名到期检查</b>",
         "",
@@ -314,9 +338,9 @@ def main() -> None:
     # 发送通知
     try:
         send_long_message(notification_lines)
-        print("通知已发送")
+        print("通知处理完成")
     except Exception as e:
-        print(f"错误: 发送 Telegram 通知失败: {e}", file=sys.stderr)
+        print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
 
 
