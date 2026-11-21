@@ -32,8 +32,8 @@ API_KEYS_RAW = require_env("API_KEY")
 API_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-MAGICPUSH_URL = os.environ.get("MAGICPUSH_URL", "")
-MAGICPUSH_TOKEN = os.environ.get("MAGICPUSH_TOKEN", "")
+MSG_PUSH_URL = os.environ.get("MSG_PUSH_URL", "")
+MSG_PUSH_TOKEN = os.environ.get("MSG_PUSH_TOKEN", "")
 
 
 # ========== 依赖检查 ==========
@@ -223,24 +223,24 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-# ========== MagicPush 通知（去除 HTML 标签） ==========
-def send_magicpush(text: str) -> bool:
-    if not MAGICPUSH_URL or not MAGICPUSH_TOKEN:
-        print("未配置 MagicPush 信息，跳过 MagicPush", file=sys.stderr)
+# ========== Push 通知 ==========
+def send_msgpush(text: str) -> bool:
+    if not MSG_PUSH_URL or not MSG_PUSH_TOKEN:
+        print("未配置 MagicPush 信息，跳过消息推送", file=sys.stderr)
         return False
 
     # 去除 HTML 标签，转为纯文本
-    plain_text = strip_html(text)
+    #plain_text = strip_html(text)
 
-    url = MAGICPUSH_URL
+    url = MSG_PUSH_URL
     headers = {
-        "Authorization": f"Bearer {MAGICPUSH_TOKEN}",
+        "Authorization": f"Bearer {MSG_PUSH_TOKEN}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     payload = {
         "title": "DigitalPlat 域名续期检测",
-        "content": plain_text,
+        "text": text,
         "type": "text",
     }
 
@@ -255,9 +255,9 @@ def send_magicpush(text: str) -> bool:
 
 
 def sendMSG(text: str) -> None:
-    """同时发送到 Telegram（HTML）和 MagicPush（纯文本），互不干扰"""
+    """同时发送到 Telegram（HTML）和 MsgPush（纯文本），互不干扰"""
     send_telegram(text)
-    send_magicpush(text)
+    send_msgpush(text)
 
 
 def send_long_message(lines: List[str]) -> None:
