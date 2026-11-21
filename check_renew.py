@@ -32,8 +32,10 @@ API_KEYS_RAW = require_env("API_KEY")
 API_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-MSG_PUSH_URL = os.environ.get("MSG_PUSH_URL", "")
-MSG_PUSH_TOKEN = os.environ.get("MSG_PUSH_TOKEN", "")
+MSG_PUSH_URL = os.environ.get("MSG_PUSH_URL", "").strip()
+MSG_PUSH_TOKEN = os.environ.get("MSG_PUSH_TOKEN", "").strip()
+# 可选：推送服务的接收人（服务端已配置默认接收人时可留空）
+MSG_PUSH_TO = os.environ.get("MSG_PUSH_TO", "").strip()
 
 
 # ========== 依赖检查 ==========
@@ -54,14 +56,30 @@ def mask_domain(name: str) -> str:
     return "***" + name[idx:]
 
 
-# ========== HTML 标签去除（用于 MagicPush 纯文本） ==========
-def strip_html(text: str) -> str:
-    """去除 HTML 标签，将 <br> 转为换行，用于不支持 HTML 的推送渠道"""
-    # 将 <br> 标签转为换行
+# ========== HTML → Markdown（用于第三方推送） ==========
+def html_to_markdown(text: str) -> str:
+    """把 Telegram 的 HTML 文本转成 Markdown，供只支持 Markdown/纯文本的推送渠道使用"""
+    # <a href="url">text</a> → [text](url)
+    text = re.sub(
+        r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>',
+        r'[\2](\1)',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # <b>text</b> → **text**
+    text = re.sub(r'<(b|strong)>(.*?)</\1>', r'**\2**', text, flags=re.IGNORECASE | re.DOTALL)
+    # <i>text</i> → _text_
+    text = re.sub(r'<(i|em)>(.*?)</\1>', r'_\2_', text, flags=re.IGNORECASE | re.DOTALL)
+    # <s>text</s> → ~~text~~
+    text = re.sub(r'<(s|strike|del)>(.*?)</\1>', r'~~\2~~', text, flags=re.IGNORECASE | re.DOTALL)
+    # <code>text</code> / <pre>text</pre> → `text`
+    text = re.sub(r'<(code|pre)>(.*?)</\1>', r'`\2`', text, flags=re.IGNORECASE | re.DOTALL)
+    # <br> → 换行，剩余标签直接丢弃
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    # 去除所有 HTML 标签
     text = re.sub(r'<[^>]+>', '', text)
-    # 合并多余空行
+    # HTML 实体（&amp; &lt; &gt; &quot; &#39;）还原
+    for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&amp;", "&")):
+        text = text.replace(entity, char)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -223,14 +241,11 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-# ========== Push 通知 ==========
+# ========== 第三方消息推送（MsgPush） ==========
 def send_msgpush(text: str) -> bool:
     if not MSG_PUSH_URL or not MSG_PUSH_TOKEN:
-        print("未配置 MagicPush 信息，跳过消息推送", file=sys.stderr)
+        print("未配置 MSG_PUSH_URL / MSG_PUSH_TOKEN，跳过消息推送", file=sys.stderr)
         return False
-
-    # 去除 HTML 标签，转为纯文本
-    #plain_text = strip_html(text)
 
     url = MSG_PUSH_URL
     headers = {
@@ -238,24 +253,45 @@ def send_msgpush(text: str) -> bool:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    payload = {
-        "title": "DigitalPlat 域名续期检测",
-        "text": text,
-        "type": "text",
-    }
+    # 按服务端调用示例，请求体只需 text（Markdown 格式）；title/type 等字段可能被严格校验拒绝
+    payload: dict = {"text": html_to_markdown(text)}
+    if MSG_PUSH_TO:
+        payload["to"] = MSG_PUSH_TO
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        print("MagicPush 通知发送成功", file=sys.stderr)
-        return True
-    except Exception as e:
-        print(f"MagicPush 发送失败: {e}", file=sys.stderr)
+    except requests.RequestException as e:
+        print(f"消息推送请求异常: {e}", file=sys.stderr)
         return False
+
+    body = (resp.text or "").strip()
+    if resp.status_code >= 400:
+        print(f"消息推送失败: HTTP {resp.status_code} {body[:800]}", file=sys.stderr)
+        return False
+
+    # 服务端约定返回 {"ok": true, "messageIds": [...]}，ok 为 false 视为失败
+    try:
+        result = resp.json()
+    except ValueError:
+        result = None
+
+    if isinstance(result, dict) and result.get("ok") is False:
+        reason = result.get("error") or result.get("message") or body
+        print(f"消息推送失败: {reason}", file=sys.stderr)
+        return False
+
+    detail = ""
+    if isinstance(result, dict):
+        if result.get("messageIds"):
+            detail = f"（{len(result['messageIds'])} 条）"
+        elif result.get("chunks"):
+            detail = f"（{result['chunks']} 段）"
+    print(f"消息推送发送成功{detail}", file=sys.stderr)
+    return True
 
 
 def sendMSG(text: str) -> None:
-    """同时发送到 Telegram（HTML）和 MsgPush（纯文本），互不干扰"""
+    """同时发送到 Telegram（HTML）和第三方推送（Markdown），互不干扰"""
     send_telegram(text)
     send_msgpush(text)
 
@@ -274,6 +310,16 @@ def send_long_message(lines: List[str]) -> None:
 # ========== 主流程 ==========
 def main() -> None:
     check_dependencies()
+
+    # 通知渠道自检：便于在 CI 日志里直接看出是哪一项没配到
+    if not MSG_PUSH_URL or not MSG_PUSH_TOKEN:
+        print(
+            "提示: 未配置 MSG_PUSH_URL / MSG_PUSH_TOKEN，本次将跳过第三方推送"
+            "（请检查 Secrets 名称与工作流 env 映射）",
+            file=sys.stderr,
+        )
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("提示: 未配置 TG_BOT_TOKEN / TG_CHAT_ID，本次将跳过 Telegram", file=sys.stderr)
 
     if not API_KEYS:
         print("错误: API_KEY 为空", file=sys.stderr)

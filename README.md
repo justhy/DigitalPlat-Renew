@@ -26,6 +26,7 @@
 - ✅ 标记 120 天窗口内需续期的域名
 - ✅ 打印终端表格概览
 - ✅ 通过 Telegram Bot 发送通知（支持长消息分片）
+- ✅ 通过第三方推送服务（MsgPush）同步推送 Markdown 消息
 - ✅ 支持 GitHub Actions 定时运行
 
 ---
@@ -40,14 +41,20 @@
 
 | Secret | 说明 |
 |--------|------|
-| `API_KEY` | DigitalPlat API Bearer Token |
-| `TG_BOT_TOKEN` | Telegram Bot Token |
-| `TG_CHAT_ID` | 接收通知的 Chat ID |
+| `API_KEY` | DigitalPlat API Bearer Token（多个账号用英文逗号分隔） |
+| `TG_BOT_TOKEN` | Telegram Bot Token（可选） |
+| `TG_CHAT_ID` | 接收通知的 Chat ID（可选） |
+| `MSG_PUSH_URL` | 第三方推送接口地址，如 `https://push.example.com/api/push`（可选） |
+| `MSG_PUSH_TOKEN` | 第三方推送 Token，以 `Authorization: Bearer <token>` 发送（可选） |
+| `MSG_PUSH_TO` | 推送接收人（可选，服务端已配置默认接收人时留空） |
 
-4. 到 **Actions** 页面手动触发一次 `renew-digitalplat` 工作流验证配置
+> Telegram 与第三方推送可以只配一个，也可以同时配置；脚本会各发一份，任一失败不影响另一个。
+> 工作流同时兼容旧的 `MAGICPUSH_URL` / `MAGICPUSH_TOKEN` Secret 名称（`MSG_PUSH_*` 为空时会回退使用）。
+
+4. 到 **Actions** 页面手动触发一次 `Check DigitalPlat Domains Renew` 工作流验证配置
 5. 成功后，工作流会按 Schedule 每天自动运行
 
-**Schedule：** 每天北京时间 09:00（UTC 01:00）
+**Schedule：** 每天北京时间 07:00（UTC 23:00）
 
 ---
 
@@ -58,30 +65,30 @@ git clone https://github.com/GaoZitian/digitalplat-renew.git
 cd digitalplat-renew
 
 # 安装依赖
-pip3 install cloudscraper
-brew install jq  # macOS
+pip3 install cloudscraper requests
 
-# 设置环境变量
-export DIGITALPLAT_API_KEY="***"
-export TELEGRAM_BOT_TOKEN="***"
-export TELEGRAM_CHAT_ID="your_chat_id"
+# 设置环境变量（至少配置 API_KEY；通知渠道按需配置其一或全部）
+export API_KEY="***"
+export TG_BOT_TOKEN="***"
+export TG_CHAT_ID="your_chat_id"
+export MSG_PUSH_URL="https://push.example.com/api/push"
+export MSG_PUSH_TOKEN="***"
 
 # 运行
-chmod +x renew-digitalplat-subdomains.sh
-./renew-digitalplat-subdomains.sh
+python3 check_renew.py
 ```
 
 ---
 
 ## ⚙️ GitHub Actions 配置
 
-工作流文件：`.github/workflows/renew-digitalplat.yml`
+工作流文件：`.github/workflows/check-digitalplat-renew.yml`
 
 ```yaml
-name: 免费域名续期检查
+name: Check DigitalPlat Domains Renew
 on:
   schedule:
-    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00
+    - cron: '0 23 * * *'  # UTC 23:00 = 北京时间 07:00
   workflow_dispatch:       # 支持手动触发
 ```
 
